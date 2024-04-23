@@ -1,0 +1,1299 @@
+```{r setup, include=FALSE}
+## Global options
+
+knitr::opts_chunk$set(echo = TRUE)
+library(Ckmeans.1d.dp)
+library(circlize)
+library(ggpubr)
+library(ggmosaic)
+library(readxl)
+library(vtable)
+library(knitr)
+library(ggbeeswarm)
+library(corrplot)
+library(grid)
+library(smplot2)
+library(DT)
+library(GGally)
+library(CCA)
+library(waffle)
+library(FactoMineR)
+library(mgsub)   
+library(pacman)
+library(ggsci)
+library(gapminder)
+library(tidytable)
+library(ggforce)
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+library(scales)
+library(ComplexHeatmap)
+library(prettydoc)
+library(tidyverse)
+library(factoextra)
+library(RColorBrewer)
+library(survivalAnalysis)
+library(survminer)
+library(matrixTests)
+```
+
+
+```{r DataLoading, echo=F, warning=FALSE, include=FALSE}
+####################################################################################
+## Data load and parsing
+####################################################################################
+
+Normes_File <- read_excel("Name of Norm file") 
+cytokineFile<-"Name of cytokine file"
+
+### --- To be modified ###
+## rds file with whole cohort
+## not included in this sharing
+
+data_all <- readRDS("")
+Normes_File$Cytokines <- gsub(pattern = "-", "_", Normes_File$Cytokines)
+Normes_File$Cytokines <- gsub(pattern = " ", "_", Normes_File$Cytokines)
+Normes_File$Cytokines <- gsub(pattern = "\\(", "", Normes_File$Cytokines)
+Normes_File$Cytokines <- gsub(pattern = "\\)", "", Normes_File$Cytokines)
+Normes_File$Cytokines <- gsub(pattern = "/", "_", Normes_File$Cytokines)
+
+Normes_File$Cytokines[Normes_File$Cytokines == "IL6_COBAS"] <- "IL_6"
+Normes_File %>% 
+  dplyr::rename("name" = "Cytokines") -> Normes_File
+
+
+
+`%nin%` = Negate(`%in%`)
+
+cohort <- data_all$cohort  %>%
+  dplyr::mutate("cohort_full" = ifelse(Sepsis_Viral== 1,
+                                       yes = "Viral_Sepsis",
+                                       no = ifelse(SousIs ==1,
+                                                   yes = paste0(cohort,"_IS"),
+                                                   no = cohort))) %>% dplyr::filter(cohort != "sepsis")
+PATIENTID_to_keep <- cohort$PATIENTID
+
+# Exclude cytokines not detected in >90% of patients
+CRS_CTK <- data_all$CTK_long %>%
+  dplyr::filter(PATIENTID %in% PATIENTID_to_keep) %>% 
+  dplyr::filter(name %nin% c("IFN_alpha2", "IL_12p70", "IL_23", "IL_31", "IL_27", "IL_4", "IL_5", "IL_9", "NGF_beta"))
+  
+# load file with cytokines groups
+cytokine_class <- read_csv(cytokineFile, show_col_types = FALSE) 
+cytokine_class$Category <- gsub(pattern = "/", "-",x = cytokine_class$Category)
+ctk_to_select <- intersect( Normes_File$name, colnames(cohort))
+
+######################################################
+### ------ LIST OF BIOMARKER TO STRATIFY ON ------ ###
+# To be edited using columns names of biomarkers   ###
+######################################################
+# Exemple
+parameters_to_stratify <- c("FERRi" ,"Fg" ,"ASAT" , "PQ" ,   "Leuco", "Hb")
+```
+
+
+
+# Stratification on Biomarkers {.tabset}
+
+## Silhouette plot
+```{r patients_silhouette, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+
+cohort_OS <- cohort %>%
+  dplyr::mutate(across(parameters_to_stratify, as.numeric)) 
+
+
+cohort_OS %>% 
+  dplyr::select(parameters_to_stratify) %>% 
+  summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE))) -> to_impute
+
+
+detect_optimal_Nclusters <- function(df){
+  
+  df_to_strat <- df %>% 
+    dplyr::mutate(across(parameters_to_stratify, ~replace_na(., median(., na.rm=TRUE)))) %>%
+    dplyr::select(PATIENTID, parameters_to_stratify)
+  
+  df_std <- df_to_strat %>%
+    select(-PATIENTID) %>%
+    scale() %>%
+    as.data.frame() %>%
+    cbind(PATIENTID = df$PATIENTID) %>%
+    dplyr::relocate(PATIENTID, .before = parameters_to_stratify[1])
+  
+  
+  plot(fviz_nbclust(df_std[, -1], kmeans, method = "silhouette", k.max = 4))
+  
+  return(df_std)
+}
+
+
+df_std_all <- detect_optimal_Nclusters(cohort_OS)
+
+
+```
+
+## Clusters
+```{r patients_clusters, echo=F, message=FALSE, warning=FALSE, include=T, results='asis'}
+
+set.seed(667)
+km.res <- kmeans(df_std_all[, -1], 2, nstart = 25)
+fviz_cluster(km.res, data = df_std_all[, -1],
+             ggtheme = theme_minimal(),
+             main = "Clustering Plot")+ 
+  scale_fill_nejm()
+
+
+ cohort_OS <- cohort_OS %>% 
+  dplyr::mutate("kmeans_parameters" = km.res$cluster) %>%
+  dplyr::relocate("kmeans_parameters", .after = "Sex") 
+```
+## OS clusters
+```{r cluster_1_survival, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_OS %>%
+  analyse_survival(., vars(Surv_Tumor, status_Tumor), 
+                   by=kmeans_parameters) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                    xscale = "scaleByYear",
+                    break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "NEJM")) 
+
+
+```
+
+## Surv from Tox clusters
+```{r cluster_1_survival_tox, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_OS %>%
+  analyse_survival(., vars(Surv_Tox, status_Tox), 
+                   by=kmeans_parameters) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                    xscale = "scaleByYear",
+                    break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "NEJM")) 
+
+
+```
+
+## Surv from first ICI clusters
+```{r cluster_1_survival_ICI, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_OS %>%
+  analyse_survival(., vars(Surv_ICI, status_ICI), 
+                   by=kmeans_parameters) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                    xscale = "scaleByYear",
+                    break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "NEJM")) 
+
+
+```
+
+
+#  Kmeans without previously identified patients {.tabset}
+## Silhouette
+```{r patients_silhouette2, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+cohort_OS %>% 
+  dplyr::filter(kmeans_parameters != 2) -> cohort_OS_without_cluster1
+
+df_std_without_k2 <- detect_optimal_Nclusters(cohort_OS_without_cluster1)
+
+```
+
+## Clusters
+```{r patients_clusters2, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+set.seed(234)
+km.res <- kmeans(df_std_without_k2[, -1], centers = 2, nstart = 25)
+fviz_cluster(km.res, data = df_std_without_k2[, -1],
+             ggtheme = theme_minimal(),
+             palette = "Dark2",
+             main = "Partitioning Clustering Plot") 
+
+
+
+```
+
+## Survival from tumor diagnosis
+```{r cluster_2_survival_Tumor, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8}
+
+
+cohort_OS_without_cluster1 %>%
+  dplyr::mutate("kmeans_hemo_2nd_round" = km.res$cluster) %>%
+  analyse_survival(., vars(Surv_Tumor, status_Tumor), 
+                   by=kmeans_hemo_2nd_round) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                     xscale = "scaleByYear", 
+                         break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+```
+
+## Survival from Tox
+```{r cluster_2_survival_Tox, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8}
+
+
+cohort_OS_without_cluster1 %>%
+  dplyr::mutate("kmeans_hemo_2nd_round" = km.res$cluster) %>%
+  analyse_survival(., vars(Surv_Tox, status_Tox), 
+                   by=kmeans_hemo_2nd_round) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                     xscale = "scaleByYear", 
+                         break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+```
+
+
+## Survival from ICI on clusters
+```{r cluster_2_survival, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8}
+
+
+cohort_OS_without_cluster1 %>%
+  dplyr::mutate("kmeans_hemo_2nd_round" = km.res$cluster) %>%
+  analyse_survival(., vars(Surv_ICI, status_ICI), 
+                   by=kmeans_hemo_2nd_round) %>%
+  
+  kaplan_meier_plot(.,
+                    hazard.ratio=TRUE,  
+                    xscale = "scaleByYear",
+                  xlab="Surv_Tumor, Years",
+                  break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+```
+
+
+## CTK within clusters {.tabset}
+```{r CTK_in_3_clusters, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10, fig.width=12}
+
+cohort_OS_without_cluster1 <- cohort_OS_without_cluster1 %>%
+  dplyr::mutate("kmeans_hemo_2nd_round" = as.factor(km.res$cluster))
+
+ctk_clusters <- right_join(CRS_CTK, cohort_OS_without_cluster1 %>% dplyr::select(PATIENTID, kmeans_hemo_2nd_round)) %>%
+  dplyr::filter(kmeans_hemo_2nd_round != 3)
+
+ctk_clusters <- left_join(ctk_clusters,Normes_File)
+
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n###", i, "\n")
+ctk_clusters %>%
+  dplyr::filter(Type == i) %>%
+ggplot(.,
+       aes(x = name,
+           y = value,
+           fill = kmeans_hemo_2nd_round)) +
+  geom_boxplot( position=position_dodge(), 
+                outlier.colour = "red") + 
+  scale_fill_brewer(palette = "Dark2") + 
+  stat_compare_means(method = "wilcox.test", hide.ns = FALSE, label = "p.signif") +
+  theme_linedraw() +
+  theme(axis.text.x=element_text(angle=45,hjust=1), 
+        text = element_text(size=18,  face = "bold")) +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  guides(fill=guide_legend(title="Cluster on biomarkers")) -> p
+
+print(p)
+
+cat("\n")
+
+}
+
+```
+
+
+
+# Merging clustering results {.tabset}
+## Survival Plot from Tox
+```{r merge_clusters, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10}
+cohort_OS_without_cluster1 <- cohort_OS_without_cluster1 %>%
+  dplyr::mutate("kmeans_hemo_2nd_round" = km.res$cluster) 
+
+cohort_hemo <- left_join(cohort_OS, cohort_OS_without_cluster1) %>%
+    dplyr::mutate("kmeans_hemo_all" = ifelse(is.na(kmeans_hemo_2nd_round),
+                                           yes = "first_group",
+                                           no = paste0("Cluster_", kmeans_hemo_2nd_round)))
+
+analyse_survival(cohort_hemo, vars(Surv_Tox, status_Tox), 
+                 by=kmeans_hemo_all) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Months",
+                    hazard.ratio=TRUE,  
+                    xscale = "scaleByYear",
+                    break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) + 
+  ggtitle(label = "From Tox")
+
+
+```
+
+## Survival Plot from Tumor Diagnosis
+```{r merge_clusters_surv_Tum, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10}
+
+analyse_survival(cohort_hemo, vars(Surv_Tumor, status_Tumor), 
+                 by=kmeans_hemo_all) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                     xscale = "scaleByYear", 
+                      break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+```
+
+
+## Survival Plot from ICI
+```{r merge_clusters_surv_Tox, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10}
+
+analyse_survival(cohort_hemo, vars(Surv_ICI, status_ICI), 
+                 by=kmeans_hemo_all) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                     xscale = "scaleByYear", 
+                        break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+```
+
+## Table with clusters
+```{r downloadCLusters, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+cohort_hemo %>% 
+  dplyr::select(PATIENTID, kmeans_hemo_all, parameters_to_stratify) %>% 
+  DT::datatable(., rownames = FALSE, extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                ))
+
+
+```
+
+
+## CTK {.tabset}
+```{r CTK_in_merged_clusters, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=14, fig.width=14}
+
+ctk_clusters <- right_join(CRS_CTK, cohort_hemo %>% dplyr::select(PATIENTID, kmeans_hemo_all)) 
+ctk_clusters <- left_join(ctk_clusters,Normes_File)
+
+my_comparisons <- list(c("Cluster_1", "Cluster_2"), c("Cluster_1", "first_group"), c("Cluster_2", "first_group"))
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n###", i, "\n")
+ctk_clusters %>%
+  dplyr::filter(Type == i) %>%
+ggplot(.,
+       aes(x = kmeans_hemo_all,
+           y = value,
+           fill = kmeans_hemo_all)) +
+  geom_boxplot( position=position_dodge(), 
+                outlier.colour = "red") + 
+  geom_point() +
+  scale_fill_brewer(palette = "Dark2") + 
+  stat_compare_means( hide.ns = FALSE, label = "p.signif", comparisons = my_comparisons) +
+  theme_linedraw() +
+  theme(axis.text.x=element_blank(), 
+        text = element_text(size=18,  face = "bold")) +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  guides(fill=guide_legend(title="Cluster on biomarkers")) -> p
+
+p + facet_wrap(~name, scales = "free") -> q
+
+print(q)
+
+cat("\n")
+
+}
+
+```
+
+
+## Biomarkers
+```{r cluster_composition_biomarkers, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.width=14, fig.height=10}
+cohort_hemo %>% 
+  dplyr::select(kmeans_hemo_all, parameters_to_stratify)  %>%
+  tidyr::pivot_longer(!kmeans_hemo_all)  %>%
+  dplyr::filter(!is.na(value)) %>%
+  ggplot(., aes(x = kmeans_hemo_all, y = log2(value))) + 
+  geom_point(alpha = .8) +
+  geom_boxplot(aes(fill = kmeans_hemo_all), 
+                  outlier.alpha = 0.6, 
+                  outlier.color = "red")+ 
+  stat_compare_means(method = "anova", label.x.npc = "center", label = "p.signif", size = 6) +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_wrap(~ name, scales = "free", nrow = 2)+ 
+  theme_linedraw() + 
+   theme(text = element_text(size=18, face = "bold"),
+         axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  xlab("")+ theme(legend.position = "bottom") + ylab("") + 
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}, breaks = breaks_width(1.5) )+
+  guides(fill=guide_legend(ncol=2, title = "Cluster"))
+
+```
+
+## Table biomarkers clusters
+```{r Table_clusters_biomarkers, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+cohort_hemo %>% 
+  dplyr::select(kmeans_hemo_all, parameters_to_stratify) %>% 
+  st(., group = "kmeans_hemo_all",  out = "return", group.test = TRUE, group.long = TRUE, add.median = TRUE) %>%
+  DT::datatable(., rownames = FALSE, extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                ))
+
+```
+
+
+## Clusters composition: Grade CRS
+```{r cluster_composition, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+cohort_hemo %>%
+  ggplot() +
+  geom_mosaic(aes(x = product(GradeCRS), fill =  GradeCRS), divider = "vspine" )+
+  facet_grid(~kmeans_hemo_all) +
+  scale_fill_jama() +
+  xlab("") +
+  ylab("") +
+  theme_bw()+ 
+  theme(text = element_text(size=16, face = "bold"),
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        strip.text.x = element_text(size = 18)) +
+  theme(legend.position="bottom")+
+  guides(fill=guide_legend(ncol=3, title = "Grade CRS"))
+
+```
+
+## Table cluster composition: Grade CRS
+```{r cluster_composition_table, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo %>% 
+  dplyr::select(GradeCRS, kmeans_hemo_all) %>%
+  dplyr::count(kmeans_hemo_all, GradeCRS ) %>%
+  dplyr::group_by(kmeans_hemo_all) %>%
+  dplyr::mutate(prop = prop.table(n))%>%
+  DT::datatable(., extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                )) %>%
+  DT::formatRound(., purrr::map_lgl(.$x$data, is.numeric), digits = 2)
+  
+```
+
+## Cluster composition: cohort
+```{r cluster_composition_cohort, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+cohort_hemo %>% 
+  dplyr::mutate("Group" = ifelse(HLH == 1,
+                                  yes = "HLH",
+                                  ifelse(sepsis == 1,
+                                         yes = "sepsis",
+                                         no = paste0("Grade_", GradeCRS)))) %>%
+  ggplot() +
+  geom_mosaic(aes(x = product(Group), fill =  Group), divider = "vspine" )+
+  facet_grid(~kmeans_hemo_all) +
+  scale_fill_lancet() +
+  xlab("") +
+  ylab("") +
+  theme_bw()+ 
+  theme(text = element_text(size=16, face = "bold"),
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        strip.text.x = element_text(size = 18)) +
+  theme(legend.position="bottom")+
+  guides(fill=guide_legend(ncol=3, title = "Grade CRS"))
+
+```
+
+## Table cluster composition: cohort
+```{r cluster_composition_table_cohort, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo %>% 
+  dplyr::mutate("Group" = ifelse(HLH == 1,
+                                  yes = "HLH",
+                                  ifelse(sepsis == 1,
+                                         yes = "sepsis",
+                                         no = paste0("Grade_", GradeCRS))))%>% 
+  dplyr::select(Group, kmeans_hemo_all) %>%
+  dplyr::count(kmeans_hemo_all, Group ) %>%
+  dplyr::group_by(kmeans_hemo_all) %>%
+  dplyr::mutate(prop = prop.table(n))%>%
+  DT::datatable(., extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                )) %>%
+  DT::formatRound(., purrr::map_lgl(.$x$data, is.numeric), digits = 2)
+  
+```
+
+## Clusters composition: oncologic response M3
+```{r cluster_composition_Onco_resp, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+cohort_hemo %>%
+  ggplot() +
+  geom_mosaic(aes(x = product(Onco_Response), fill =  Onco_Response), divider = "vspine" )+
+  facet_grid(~kmeans_hemo_all) +
+  scale_fill_startrek() +
+  xlab("") +
+  ylab("") +
+  theme_bw()+ 
+  theme(text = element_text(size=16, face = "bold"),
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        strip.text.x = element_text(size = 18)) +
+  theme(legend.position="bottom")+
+  guides(fill=guide_legend(ncol=3, title = "Oncologic Response M3"))
+
+```
+
+## Table cluster composition: Oncologic response
+```{r cluster_composition_table_response, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo %>% 
+  dplyr::count(kmeans_hemo_all, Onco_Response ) %>%
+  dplyr::group_by(kmeans_hemo_all) %>%
+  dplyr::mutate(prop = prop.table(n))%>%
+  DT::datatable(., extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                )) %>%
+  DT::formatRound(., purrr::map_lgl(.$x$data, is.numeric), digits = 2)
+  
+```
+
+## Clusters composition: tumor type
+```{r cluster_composition_TumType, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo$Tumor_Type <- as.factor(cohort_hemo$Tumor_Type)
+
+cohort_hemo %>%
+  ggplot() +
+  geom_mosaic(aes(x = product(Tumor_Type), fill =  Tumor_Type), divider = "vspine" )+
+  facet_grid(~kmeans_hemo_all) +
+  scale_fill_frontiers() +
+  xlab("") +
+  ylab("") +
+  theme_bw()+ 
+  theme(text = element_text(size=16, face = "bold"),
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        strip.text.x = element_text(size = 18)) +
+  theme(legend.position="bottom")+
+  guides(fill=guide_legend(ncol=3, title = "Tumor type"))
+
+```
+
+## Table cluster composition: Tumor type
+```{r cluster_composition_table_TumorType, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo %>% 
+  dplyr::count(kmeans_hemo_all, Tumor_Type ) %>%
+  dplyr::group_by(kmeans_hemo_all) %>%
+  dplyr::mutate(prop = round(prop.table(n), digits = 4))%>%
+  dplyr::mutate(prop = paste(prop*100, "%")) %>%
+  DT::datatable(., extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                )) %>%
+  DT::formatRound(., purrr::map_lgl(.$x$data, is.numeric), digits = 2)
+  
+```
+
+## CLusters composition: TCZ received
+```{r cluster_composition_TCZ, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo$TCZ <- as.factor(cohort_hemo$TCZ)
+
+cohort_hemo %>%
+  ggplot() +
+  geom_mosaic(aes(x = product(TCZ), fill =  TCZ), divider = "vspine" )+
+  facet_grid(~kmeans_hemo_all) +
+  scale_fill_frontiers() +
+  xlab("") +
+  ylab("") +
+  theme_bw()+ 
+  theme(text = element_text(size=16, face = "bold"),
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        strip.text.x = element_text(size = 18)) +
+  theme(legend.position="bottom")+
+  guides(fill=guide_legend(ncol=3, title = "TCZ received"))
+```
+
+## Table cluster composition: TCZ received
+```{r cluster_composition_table_TCZ, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+
+cohort_hemo %>% 
+  dplyr::count(kmeans_hemo_all, TCZ ) %>%
+  dplyr::group_by(kmeans_hemo_all) %>%
+  dplyr::mutate(prop = round(prop.table(n), digits = 4))%>%
+  dplyr::mutate(prop = paste(prop*100, "%")) %>%
+  DT::datatable(., extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                )) %>%
+  DT::formatRound(., purrr::map_lgl(.$x$data, is.numeric), digits = 2)
+  
+```
+
+## Survival on tumor type {.tabset}
+### KM curves OS
+```{r cluster_composition_TumorType_Surv, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10}
+analyse_survival(cohort_hemo, vars(Surv_Tumor, status_Tumor), 
+                 by=Tumor_Type) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Months",
+                    hazard.ratio=TRUE,  
+                    xscale = "scaleByYear",
+                    break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+
+```
+
+### Univariate Cox OS
+```{r cluster_composition_TumorType_Cox, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=6}
+
+analyse_survival(cohort_hemo, 
+                     vars(Surv_Tumor, status_Tumor), 
+                 by = "Tumor_Type") %>%
+  
+forest_plot(use_one_hot = TRUE, HR_x_breaks = c(-1, 0, 1, 2, 4, 6, 8, 10))
+
+
+```
+
+### CTK within tumors{.tabset}
+```{r CTK_in_tumortype, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=6, fig.width=6}
+cohort_ctk_tum_filtered <- left_join(CRS_CTK, cohort_hemo %>% 
+                                       dplyr::select(PATIENTID, Tumor_Type)) %>%
+  dplyr::filter(Tumor_Type %in% c("Melanoma", "LungK"))
+
+cohort_ctk_tum_filtered <- left_join(cohort_ctk_tum_filtered,Normes_File)
+
+comparisons <- list(c("Melanoma", "LungK"))
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n####", i, "{.tabset}","\n")
+  
+ctk_to_plot <- cohort_ctk_tum_filtered %>%
+  dplyr::filter(Type == i) 
+
+ for(j in unique(ctk_to_plot$name)) {
+    
+    cat("\n#####", j,  "\n") 
+
+ctk_to_plot%>%
+  dplyr::filter(name == j) %>%
+ggplot(.,
+       aes(x = Tumor_Type,
+           y = value,
+           fill = Tumor_Type)) +
+  sm_raincloud()+ 
+  stat_compare_means(comparisons = comparisons) + 
+  scale_fill_frontiers() + 
+  theme_linedraw() +
+  theme(axis.text.x=element_text(angle=45,hjust=1), 
+        text = element_text(size=18,  face = "bold"), 
+        legend.position = "none") +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  ggtitle(label = j) -> p
+
+print(p)
+
+cat("\n")
+
+}
+cat("\n")
+
+}
+
+```
+
+
+## Survival Clusters by Melanoma {.tabset}
+### All clusters from Tox
+```{r surv_Mel_all_tox, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10}
+
+cohort_hemo %>% 
+  dplyr::mutate("Cluster_Mel" = ifelse(Tumor_Type == "Melanoma", 
+                                       yes = paste0(kmeans_hemo_all, "_Mel"),
+                                       no = kmeans_hemo_all)) %>%
+
+
+analyse_survival(., vars(Surv_Tox, status_Tox), 
+                 by=Cluster_Mel) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Months",
+                    hazard.ratio=TRUE,  
+                    break.time.by="breakByHalfYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Set1")) 
+
+
+```
+
+### All clusters from Tumor Diagnosis
+```{r surv_Mel_all_Tum, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=10}
+
+cohort_hemo %>% 
+  dplyr::mutate("Cluster_Mel" = ifelse(Tumor_Type == "Melanoma", 
+                                       yes = paste0(kmeans_hemo_all, "_Mel"),
+                                       no = kmeans_hemo_all)) %>%
+
+
+analyse_survival(., vars(Surv_Tumor, status_Tumor), 
+                 by=Cluster_Mel) -> result
+  
+  kaplan_meier_plot(result,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                      xscale = "scaleByYear",
+                    break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Set1")) 
+
+
+```
+
+
+
+### Cluster_2 and CLuster_3 Mel from Tox
+```{r surv_Mel_only2_3, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8}
+
+cohort_hemo %>% 
+  dplyr::mutate("Cluster_Mel" = ifelse(Tumor_Type == "Melanoma", 
+                                       yes = paste0(kmeans_hemo_all, "_Mel"),
+                                       no = kmeans_hemo_all)) %>%
+  dplyr::filter(Cluster_Mel %in% c("Cluster_2_Mel", "Cluster_1_Mel")) -> cohort_hemo_Mel
+
+analyse_survival(cohort_hemo_Mel, vars(Surv_Tox, status_Tox), 
+                 by=Cluster_Mel) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Months from Tox",
+                    hazard.ratio=TRUE,  
+                    break.time.by="breakByHalfYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=18, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Set1"), 
+                    xlim = c(0, 550)) 
+
+
+```
+
+### Cytokines {.tabset}
+
+```{r Clusters_Mel_CTK, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=6, fig.width=6}
+
+cohort_hemo_Mel <- right_join(CRS_CTK, cohort_hemo_Mel %>% dplyr::select(PATIENTID, Cluster_Mel)) 
+
+cohort_hemo_Mel <- left_join(cohort_hemo_Mel,Normes_File)
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n####", i, "{.tabset}","\n")
+
+  cohort_hemo_Mel_to_plot <- cohort_hemo_Mel %>%
+    dplyr::filter(Type == i) 
+
+for(j in unique(cohort_hemo_Mel_to_plot$name)) {
+    
+    cat("\n#####", j,  "\n") 
+
+cohort_hemo_Mel_to_plot %>%
+    dplyr::filter(name == j) %>%
+
+ggplot(.,
+       aes(x = Cluster_Mel,
+           y = value,
+           fill = Cluster_Mel)) +
+  sm_raincloud()+ 
+  stat_compare_means(hide.ns = TRUE,  label.x.npc = "center", size = 4, label = "p.signif") + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_linedraw() +
+  theme(axis.text.x=element_text(angle=45,hjust=1), 
+        text = element_text(size=18,  face = "bold"), 
+        legend.position = "none") +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  ggtitle(label = j)-> p
+
+print(p)
+
+cat("\n")
+
+}
+
+  cat("\n")
+
+}
+```
+
+
+## Cluster composition: Platelets
+```{r cluster_composition_PQ, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=6, fig.width=6}
+cohort_hemo %>% 
+  dplyr::select(kmeans_hemo_all, "PQ")  %>%
+  tidyr::pivot_longer(!kmeans_hemo_all)  %>%
+  dplyr::filter(!is.na(value)) %>%
+  ggplot(., aes(x = kmeans_hemo_all, y = value)) + 
+  geom_point(alpha = .8) +
+  geom_boxplot(aes(fill = kmeans_hemo_all), 
+                  outlier.alpha = 0.6, 
+                  outlier.color = "red")+ 
+  stat_compare_means(method = "anova", label.x.npc = "center", label = "p.signif", size = 6) +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_wrap(~ name, scales = "free", nrow = 2)+ 
+  theme_linedraw() + 
+   theme(text = element_text(size=18, face = "bold"),
+         axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  xlab("")+ theme(legend.position = "bottom") + ylab("") + 
+  guides(fill=guide_legend(ncol=2, title = "Cluster"))
+
+
+```
+
+
+# CTK within the clusters {.tabset}
+
+## CTK heatmap 
+```{r CTK_heatmap_clusters, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8, fig.width=8}
+df_heatmap_clusters <- CRS_CTK %>% 
+  dplyr::select(PATIENTID, name, value, cohort) %>% 
+  dplyr::filter(!is.na(value)) %>%
+  dplyr::left_join(., cohort_hemo %>% dplyr::select(PATIENTID,kmeans_hemo_all, HighGrade)) %>%
+  tidyr::pivot_wider(names_from = "name", values_from = "value") %>% 
+  dplyr::mutate('Grade' = ifelse(HighGrade == 0,
+                                 yes = "Low",
+                                 no = "High")) %>%
+  select(where(~ is.character(.) | n_distinct(.) > 3))
+
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CCL2_MCP_1"] <- "CCL2"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CCL3_MIP_1alpha"] <- "CCL3"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CCL4_MIP_1beta"] <- "CCL4"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CCL5_RANTES"] <- "CCL5"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CCL11_Eotaxin"] <- "CCL11"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CXCL1_GRO_alpha_KC"] <- "CXCL1"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CXCL8_IL_8"] <- "CXCL8"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CXCL9_MIG"] <- "CXCL9"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CXCL10_IP_10"] <- "CXCL10"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CXCL12_SDF_1alpha"] <- "CXCL12"
+colnames(df_heatmap_clusters)[colnames(df_heatmap_clusters) == "CXCL13_BLC"] <- "CXCL13"
+
+df_heatmap_clusters$kmeans_hemo_all <- as.factor(df_heatmap_clusters$kmeans_hemo_all)
+df_heatmap_clusters <- df_heatmap_clusters %>% dplyr::arrange(kmeans_hemo_all)
+
+df_heatmap_clusters$Grade <- as.factor(df_heatmap_clusters$Grade)
+
+lev <- c("#1B9E77", "#D95F02", "#7570B3")
+names(lev) <- levels(df_heatmap_clusters$kmeans_hemo_all)
+
+grade_col <- c("#efc000ff", "#0073c2ff")
+names(grade_col) <- levels(df_heatmap_clusters$Grade )
+
+ha <- HeatmapAnnotation(Cluster = df_heatmap_clusters$kmeans_hemo_all , 
+                        Grade = df_heatmap_clusters$Grade, 
+                        annotation_legend_param = list(
+                          Cluster = list(
+                            title = "Cluster",
+                            at = levels(df_heatmap_clusters$kmeans_hemo_all),
+                            labels = levels(df_heatmap_clusters$kmeans_hemo_all)
+                          ), 
+                          Grade = list(
+                            title = "Grade",
+                            at = levels(df_heatmap_clusters$Grade),
+                            labels = levels(df_heatmap_clusters$Grade)
+                          )),
+                        
+                        
+                        col = list(Cluster = lev, 
+                                   Grade = grade_col)
+                        
+)
+
+df_to_plot <- as.matrix(t(scale(df_heatmap_clusters[, -c(1:3, ncol(df_heatmap_clusters))]))) 
+colnames(df_to_plot) <- df_heatmap_clusters$PATIENTID
+
+plot_heat <- Heatmap(df_to_plot,
+                     col=colorRamp2(c(min(df_to_plot, na.rm=T), 
+                                      mean(df_to_plot, na.rm=T), 
+                                      max(df_to_plot, na.rm=T)), 
+                                    c("blue", "white", "red")), 
+                     rect_gp = gpar(col = "black"),
+                     cluster_columns = FALSE, 
+                     top_annotation = ha, 
+                     row_names_gp = gpar(fontface = "bold"),
+                     show_column_names = FALSE,
+                     name =  "Values", 
+                     heatmap_legend_param = list(
+                       direction = "horizontal"), 
+                     border = "white"
+)
+
+
+draw(plot_heat,
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "right")
+
+```
+
+## Table CTK clusters
+```{r Table_clusters_CTK, echo=F, warning=FALSE, include=T, message=FALSE, results='asis'}
+df_heatmap_clusters %>% 
+  dplyr::select(kmeans_hemo_all, intersect(colnames(df_heatmap_clusters), Normes_File$name)) %>% 
+  st(., group = "kmeans_hemo_all",  out = "return", group.test = TRUE, group.long = TRUE, add.median = TRUE) %>%
+  DT::datatable(., rownames = FALSE, extensions = 'Buttons', 
+                options = list(dom = 'Blfrtip',
+                               buttons = list('copy', 'print', list(extend = 'collection',
+                                                                    buttons=c('csv','excel', 'pdf'),
+                                                                    text = 'Download')
+                               )
+                ))
+
+```
+
+## Boxplots by CTK families and "HLH" effect {.tabset}
+
+```{r CTK_within_clusters, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=14, fig.width=16}
+ctk_on_hemo <- left_join(CRS_CTK, cohort_hemo %>% dplyr::select(PATIENTID,HLH, kmeans_hemo_all)) 
+
+
+ctk_on_hemo <- left_join(ctk_on_hemo,Normes_File)
+ctk_on_hemo <- ctk_on_hemo %>%
+  dplyr::mutate("HLH" = ifelse(HLH == 1, 
+                               yes = "HLH",
+                               no = "")) %>%
+  dplyr::mutate("new_col" = paste(kmeans_hemo_all, HLH, sep = "_")) 
+
+
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n###", i, "\n")
+ctk_on_hemo %>%
+  dplyr::filter(Type == i) %>%
+ggplot(.,
+       aes(x = new_col,
+           y = value,
+           fill = kmeans_hemo_all)) +
+  geom_boxplot( position=position_dodge(), 
+                outlier.colour = "red") + 
+  scale_fill_brewer(palette = "Dark2") + 
+  theme_linedraw() +
+  theme(axis.text.x=element_text(angle=45,hjust=1), 
+        text = element_text(size=18,  face = "bold")) +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  guides(fill=guide_legend(title="Cluster on biomarkers")) +
+  facet_wrap(~name, scales = "free_y", ncol = 3)-> p
+
+print(p)
+
+cat("\n")
+
+}
+
+```
+
+
+
+# Focus on Cluster_1 and first_group {.tabset}
+## Biomarkers
+```{r focus_cluster_composition_biomarkers, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.width=14, fig.height=10}
+cohort_hemo %>% 
+  dplyr::select(kmeans_hemo_all, parameters_to_stratify)  %>%
+    dplyr::filter(kmeans_hemo_all %in% c("Cluster_1", "first_group")) %>% 
+  tidyr::pivot_longer(!kmeans_hemo_all)  %>%
+  dplyr::filter(!is.na(value)) %>%
+  ggplot(., aes(x = kmeans_hemo_all, y = value)) + 
+  geom_boxplot(aes(fill = kmeans_hemo_all), 
+                  outlier.alpha = 0.6, 
+                  outlier.color = "red")+ 
+    geom_point(alpha = .8) +
+
+  stat_compare_means(method = "wilcox", label.x.npc = "center", label = "p.signif", size = 6) +
+  scale_fill_manual(values = c("#1B9E77", "#7570B3")) + 
+  facet_wrap(~ name, scales = "free", nrow = 2)+ 
+  theme_linedraw() + 
+   theme(text = element_text(size=18, face = "bold"),
+         axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  xlab("")+ theme(legend.position = "bottom") + ylab("") + 
+  guides(fill=guide_legend(ncol=2, title = "Cluster"))
+
+```
+
+## Cytokines {.tabset}
+```{r focus_clusters,  echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.width=14, fig.height=12}
+ctk_on_hemo <- left_join(CRS_CTK, cohort_hemo %>% dplyr::select(PATIENTID,HLH, kmeans_hemo_all)) 
+
+
+ctk_on_hemo <- left_join(ctk_on_hemo,Normes_File) 
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n###", i, "\n")
+ctk_on_hemo %>%
+  dplyr::filter(Type == i) %>%
+  dplyr::filter(kmeans_hemo_all %in% c("Cluster_1", "first_group")) %>%
+ggplot(.,
+       aes(x = name,
+           y = value,
+           fill = kmeans_hemo_all)) +
+  geom_boxplot( position=position_dodge(), 
+                outlier.colour = "red") + 
+  geom_point(position = position_dodge(width = 0.7)) +
+  stat_compare_means(label = "p.signif", size =8, hide.ns = TRUE) +
+  scale_fill_manual(values = c("#1B9E77", "#7570B3")) + 
+  theme_linedraw() +
+  theme(axis.text.x=element_text(angle=45,hjust=1), 
+        text = element_text(size=18,  face = "bold")) +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  guides(fill=guide_legend(title="Cluster on biomarkers"))  -> p
+
+print(p)
+
+cat("\n")
+
+}
+
+
+```
+
+
+# Focus on HLH patients {.tabset}
+There are HLH patients within cluster 1 and withing the first group with very different survival profile. 
+
+## Survival from Tox
+```{r HLH__survival_Tox, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8}
+cohort_HLH <- cohort_hemo %>% 
+  #dplyr::filter(kmeans_hemo_all %in% c("Cluster_1", "first_group")) %>%
+  dplyr::filter(cohort == "HLH") %>%
+  dplyr::mutate("kmeans_HLH" = ifelse(grepl("Clu", kmeans_hemo_all),
+                                      yes = paste0(kmeans_hemo_all, "_HLH"),
+                                      no = "HLH_bad_prognosis"))
+                
+            
+
+cohort_HLH %>%
+  analyse_survival(., vars(Surv_Tox, status_Tox), 
+                   by=kmeans_HLH) %>%
+  
+  kaplan_meier_plot(.,  
+                    xlab="Years",
+                    hazard.ratio=TRUE,  
+                     xscale = "scaleByYear", 
+                         break.time.by="breakByYear",
+                    ggtheme=ggplot2::theme_minimal()+ theme(text = element_text(size=16, face = "bold")),
+                    risk.table=TRUE,
+                    mapped_plot_args = list(palette = "Dark2")) 
+
+
+```
+
+## Heatmap CTK
+```{r CTK_heatmap_clusters_HLH, echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.height=8, fig.width=8}
+df_heatmap_clusters_HLH <- CRS_CTK %>% 
+  dplyr::select(PATIENTID, name, value, cohort) %>% 
+  dplyr::filter(cohort == "HLH") %>%
+  dplyr::filter(!is.na(value)) %>%
+  dplyr::left_join(., cohort_hemo %>% dplyr::select(PATIENTID,kmeans_hemo_all)) %>%
+  dplyr::mutate("kmeans_HLH" = ifelse(grepl("Clu", kmeans_hemo_all),
+                                      yes = paste0(kmeans_hemo_all, "_HLH"),
+                                      no = "HLH_bad_prognosis"))%>%
+  tidyr::pivot_wider(names_from = "name", values_from = "value") %>% 
+  select(where(~ is.character(.) | n_distinct(.) > 3))
+
+
+
+df_heatmap_clusters_HLH$kmeans_HLH <- as.factor(df_heatmap_clusters_HLH$kmeans_HLH)
+df_heatmap_clusters_HLH <- df_heatmap_clusters_HLH %>% dplyr::arrange(kmeans_HLH)
+
+lev <- c("#1B9E77", "#7570B3")
+names(lev) <- levels(df_heatmap_clusters_HLH$kmeans_HLH)
+
+ha <- HeatmapAnnotation(Cluster = df_heatmap_clusters_HLH$kmeans_HLH , 
+                        annotation_legend_param = list(
+                          Cluster = list(
+                            title = "Cluster",
+                            at = levels(df_heatmap_clusters_HLH$kmeans_HLH),
+                            labels = levels(df_heatmap_clusters_HLH$kmeans_HLH)
+                          )),
+                        
+                        
+                        col = list(Cluster = lev)
+                        
+)
+
+df_to_plot <- as.matrix(t(scale(df_heatmap_clusters_HLH[, -c(1:4)]))) 
+colnames(df_to_plot) <- df_heatmap_clusters_HLH$PATIENTID
+
+plot_heat <- Heatmap(df_to_plot,
+                     col=colorRamp2(c(min(df_to_plot, na.rm=T), 
+                                      mean(df_to_plot, na.rm=T), 
+                                      max(df_to_plot, na.rm=T)), 
+                                    c("blue", "white", "red")), 
+                     rect_gp = gpar(col = "black"),
+                     cluster_columns = FALSE, 
+                     top_annotation = ha,
+                     show_column_names = FALSE,
+                     name =  "Values", 
+                     heatmap_legend_param = list(
+                       direction = "horizontal"), 
+                     border = "white"
+)
+
+
+draw(plot_heat,
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "right")
+
+```
+
+## CTK {.tabset}
+```{r CTK_HLH,  echo=F, warning=FALSE, include=T, message=FALSE, results='asis', fig.width=6, fig.height=6}
+
+
+ctk_HLH <- right_join(CRS_CTK, cohort_HLH %>% dplyr::select(PATIENTID, kmeans_HLH)) 
+
+
+ctk_HLH <- left_join(ctk_HLH,Normes_File) 
+
+my_comp <- list(c("Cluster_1_HLH", "Cluster_2_HLH"), c("Cluster_1_HLH", "first_group"), c("Cluster_2_HLH", "first_group"))
+
+for (i in unique(Normes_File$Type)) {
+  
+cat("\n###", i, "{.tabset}","\n")
+  
+  ctk_to_plot <- ctk_HLH %>%
+  dplyr::filter(Type == i) 
+  
+  for(j in unique(ctk_to_plot$name)) {
+    
+   cat("\n####", j,  "\n") 
+    
+ctk_to_plot %>%
+      dplyr::filter(name == j) %>%
+ggplot(.,
+       aes(x = kmeans_HLH,
+           y = value,
+           fill = kmeans_HLH)) +
+  geom_boxplot( position=position_dodge(), 
+                outlier.colour = "red") + 
+  geom_point(position = position_dodge(width = 0.7)) +
+  stat_compare_means(label = "p.signif", size =8,comparisons = my_comp, method = "t.test") +
+  scale_fill_manual(values = c("#1B9E77", "#D95F02", "#7570B3")) + 
+  theme_linedraw() +
+  theme(axis.text.x=element_text(angle=45,hjust=1), 
+        text = element_text(size=18,  face = "bold"), 
+        legend.position = "none") +
+  xlab("")+
+  ylab("") +
+  scale_y_continuous(labels = function(y){return(round(2^y, digits = 1))}) +
+  guides(fill=guide_legend(title="Clusters")) -> p
+
+print(p)
+
+cat("\n")
+
+  }
+  
+  cat("\n")
+}
+
+
+```
+
