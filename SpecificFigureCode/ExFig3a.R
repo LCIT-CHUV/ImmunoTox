@@ -1,6 +1,6 @@
 library(forestplot)
 library(dplyr)
-
+library(tibble)
 
 base_data <- tibble::tibble(mean  = c(5.605,6.643,5.811),
                            lower = c(1.445,1.736,0.8446),
