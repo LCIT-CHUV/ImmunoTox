@@ -1,1 +1,1 @@
-Folder with specific code for figure panels 
+Folder with example of code for figure panels 
